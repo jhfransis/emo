@@ -1,0 +1,14 @@
+mock_futures:
+  acctno: "60045164"
+  appkey: "PSbPzPGCUxqEZmoC4zVBP8LX2Gswmj3ovwWA"
+  seckey: "ps2lhIse5WMVxXb8q3828C2mMIFhuKC2HKvBoxCCo5Hz4CjwwyhUZRkv7jrbcl5Pr8mCPRXHzKqh15gP/BgE3P/9ARDCCl1us042f4e2niCrIT44D0djNvIrmVQzqIjfULkcwadwA8iumCZa9z8OtQH4T3XyrWp630BPeL5pftpVdq+psBI="
+
+mock_domestic:
+  acctno: "50194543"
+  appkey: "PSYewOjvYq8xCx2uFfcr7A0wV393OYAfl5C8"
+  seckey: "DPP8jtTHisFrZjJXKL0sVEOMMlSnQ6m9/Kg51BRfs+7BPQrmr6y6ACxQz9rnoYSPeaRDY7oaMfDm14fHELLs7qVa3ncSaiPUxTJC9vXu9DQx6LVmFy7SjHksx/7br5HIPiPWFhFQ0pizPqxUvwyjq60YZZtroIR6ZidhLbqL0t/1868CUjc="
+
+mock_overseas:
+  acctno: "50194543"
+  appkey: "PSzjUpaQOwPleylJYL1zOKsseAIihSVoNrNa"
+  seckey: "o6M4RMWl23RAkbwonwLRzCDXznrcwjB6ktzLR3kiV3bX6wVn7r//3rbfvUiNmmArK0kRpX+cv+4tRrzW63TE72qA61NIRgG0bYxrRx7mcB+gK+9VoczjP55Qq6IFCKt8mR0WSVoPfX62yDrC5lv60BiTJY3aRcsXS1u6uRjaZCobn9nZBP0="
