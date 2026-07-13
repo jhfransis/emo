@@ -68,7 +68,9 @@ def normalize_bar(row: dict) -> dict | None:
 
     time_value = time_value.zfill(6)
     return {
-        "ts": f"{date}{time_value}",
+        "trade_datetime": f"{date}{time_value}",
+        "trade_date": date,
+        "trade_time": time_value,
         "open": _to_float(row.get("futs_oprc")),
         "high": _to_float(row.get("futs_hgpr")),
         "low": _to_float(row.get("futs_lwpr")),
@@ -100,7 +102,7 @@ def download_minute_backward(
     product_key: str,
     mode: str,
     end_dt: datetime,
-    until_ts: str | None = None,
+    until_datetime: str | None = None,
     token: str | None = None,
     symbol: str | None = None,
     paginate: bool = True,
@@ -109,7 +111,7 @@ def download_minute_backward(
 ) -> tuple[str, list[dict]]:
     """end_dt부터 과거 방향으로 분봉 수집.
 
-    until_ts가 있으면 해당 시각(포함)까지, 없으면 서버가 더 이상 주지 않을 때까지.
+    until_datetime이 있으면 해당 시각(포함)까지, 없으면 서버가 더 이상 주지 않을 때까지.
     paginate=False이면 1회 호출분만 수집.
     """
     cfg = load_profile(profile)
@@ -142,7 +144,7 @@ def download_minute_backward(
                 candidate,
                 market_div,
                 end_dt,
-                until_ts=until_ts,
+                until_datetime=until_datetime,
                 paginate=paginate,
                 verbose=verbose,
                 stop_on_empty=stop_on_empty,
@@ -167,7 +169,7 @@ def _download_minute_backward_symbol(
     symbol: str,
     market_div: str,
     end_dt: datetime,
-    until_ts: str | None,
+    until_datetime: str | None,
     paginate: bool,
     verbose: bool,
     stop_on_empty: bool,
@@ -175,7 +177,7 @@ def _download_minute_backward_symbol(
     date_cursor = end_dt.strftime("%Y%m%d")
     time_cursor = end_dt.strftime("%H%M%S")
 
-    by_ts: dict[str, dict] = {}
+    by_datetime: dict[str, dict] = {}
     page = 0
 
     while True:
@@ -192,7 +194,7 @@ def _download_minute_backward_symbol(
                 market_div=market_div,
             )
         except Exception:
-            if by_ts:
+            if by_datetime:
                 break
             raise
 
@@ -205,16 +207,16 @@ def _download_minute_backward_symbol(
             bar = normalize_bar(row)
             if not bar:
                 continue
-            if page_oldest is None or bar["ts"] < page_oldest:
-                page_oldest = bar["ts"]
-            if bar["ts"] in by_ts:
+            if page_oldest is None or bar["trade_datetime"] < page_oldest:
+                page_oldest = bar["trade_datetime"]
+            if bar["trade_datetime"] in by_datetime:
                 continue
-            if until_ts and bar["ts"] < until_ts:
+            if until_datetime and bar["trade_datetime"] < until_datetime:
                 continue
             page_bars.append(bar)
 
         for bar in page_bars:
-            by_ts[bar["ts"]] = bar
+            by_datetime[bar["trade_datetime"]] = bar
 
         if stop_on_empty and len(page_bars) == 0:
             if verbose:
@@ -223,14 +225,14 @@ def _download_minute_backward_symbol(
 
         if verbose:
             oldest = page_oldest or "-"
-            newest = max((bar["ts"] for bar in page_bars), default="-")
+            newest = max((bar["trade_datetime"] for bar in page_bars), default="-")
             print(
                 f"    [1m p{page}] {date_cursor} {time_cursor} "
-                f"+{len(page_bars)}건 (누적 {len(by_ts)}건, {oldest}~{newest})",
+                f"+{len(page_bars)}건 (누적 {len(by_datetime)}건, {oldest}~{newest})",
                 flush=True,
             )
 
-        if until_ts and page_oldest and page_oldest <= until_ts:
+        if until_datetime and page_oldest and page_oldest <= until_datetime:
             break
 
         if not paginate:
@@ -244,11 +246,13 @@ def _download_minute_backward_symbol(
 
         oldest_in_page = min(
             (bar for bar in (normalize_bar(row) for row in rows) if bar),
-            key=lambda item: item["ts"],
+            key=lambda item: item["trade_datetime"],
         )
-        oldest_ts = oldest_in_page["ts"]
-        date_cursor, time_cursor = shift_cursor(oldest_ts[:8], oldest_ts[8:], 1)
+        oldest_datetime = oldest_in_page["trade_datetime"]
+        date_cursor, time_cursor = shift_cursor(
+            oldest_datetime[:8], oldest_datetime[8:], 1
+        )
         time.sleep(API_SLEEP_SEC)
 
-    bars = [by_ts[key] for key in sorted(by_ts)]
+    bars = [by_datetime[key] for key in sorted(by_datetime)]
     return symbol, bars

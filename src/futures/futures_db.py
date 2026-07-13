@@ -16,7 +16,9 @@ DB_DIR = Path(__file__).resolve().parent.parent.parent / "db"
 DB_PATH = DB_DIR / "futures.db"
 
 MINUTE_COLUMNS = (
-    "ts",
+    "trade_datetime",
+    "trade_date",
+    "trade_time",
     "open",
     "high",
     "low",
@@ -57,12 +59,14 @@ def init_db(conn: sqlite3.Connection) -> None:
 def _create_minute_table_sql(table: str) -> str:
     return f"""
     CREATE TABLE IF NOT EXISTS {table} (
-        ts           TEXT NOT NULL PRIMARY KEY,
-        open         REAL,
-        high         REAL,
-        low          REAL,
-        close        REAL,
-        volume       INTEGER
+        trade_datetime TEXT NOT NULL PRIMARY KEY,
+        trade_date     TEXT NOT NULL,
+        trade_time     TEXT NOT NULL,
+        open           REAL,
+        high           REAL,
+        low            REAL,
+        close          REAL,
+        volume         INTEGER
     );
     """
 
@@ -80,8 +84,12 @@ def _create_daily_table_sql(table: str) -> str:
     """
 
 
-def get_ts_bounds(conn: sqlite3.Connection, table: str) -> tuple[str | None, str | None]:
-    row = conn.execute(f"SELECT MIN(ts), MAX(ts) FROM {table}").fetchone()
+def get_datetime_bounds(
+    conn: sqlite3.Connection, table: str
+) -> tuple[str | None, str | None]:
+    row = conn.execute(
+        f"SELECT MIN(trade_datetime), MAX(trade_datetime) FROM {table}"
+    ).fetchone()
     if not row or not row[0]:
         return None, None
     return row[0], row[1]
@@ -160,8 +168,8 @@ def sync_minute_product(
 ) -> tuple[str, int, str | None, str | None, str | None, str | None]:
     product = PRODUCTS[product_key]
     table = product["table_1m"]
-    first_ts, last_ts = get_ts_bounds(conn, table)
-    original_first_ts = first_ts
+    first_dt, last_dt = get_datetime_bounds(conn, table)
+    original_first_dt = first_dt
     end_dt = end_dt or datetime.now()
 
     cfg = load_profile(profile)
@@ -173,37 +181,37 @@ def sync_minute_product(
     # 1) 현재 → DB 마지막(포함) 갱신 — 마지막 봉은 미완성일 수 있어 재수집
     if verbose:
         print("  → 최근 갱신", flush=True)
-    if last_ts:
+    if last_dt:
         symbol, recent = download_minute_backward(
             profile,
             product_key,
             mode,
             end_dt,
-            until_ts=last_ts,
+            until_datetime=last_dt,
             token=token,
             verbose=verbose,
         )
-        all_bars.update({bar["ts"]: bar for bar in recent})
+        all_bars.update({bar["trade_datetime"]: bar for bar in recent})
     else:
         symbol, recent = download_minute_backward(
             profile,
             product_key,
             mode,
             end_dt,
-            until_ts=None,
+            until_datetime=None,
             token=token,
             paginate=extend,
             verbose=verbose,
         )
-        all_bars.update({bar["ts"]: bar for bar in recent})
+        all_bars.update({bar["trade_datetime"]: bar for bar in recent})
 
     # 2) --extend: DB 첫 시각 이전 과거 확장 (서버가 없을 때까지)
     if extend:
-        anchor_ts = original_first_ts or (min(all_bars.keys()) if all_bars else None)
-        if anchor_ts:
+        anchor_dt = original_first_dt or (min(all_bars.keys()) if all_bars else None)
+        if anchor_dt:
             if verbose:
-                print(f"  → 과거 확장 (기준 {anchor_ts})", flush=True)
-            end_backfill = datetime.strptime(anchor_ts, "%Y%m%d%H%M%S") - timedelta(
+                print(f"  → 과거 확장 (기준 {anchor_dt})", flush=True)
+            end_backfill = datetime.strptime(anchor_dt, "%Y%m%d%H%M%S") - timedelta(
                 minutes=1
             )
             symbol, older = download_minute_backward(
@@ -211,20 +219,20 @@ def sync_minute_product(
                 product_key,
                 mode,
                 end_backfill,
-                until_ts=None,
+                until_datetime=None,
                 token=token,
                 symbol=symbol,
                 verbose=verbose,
                 stop_on_empty=True,
             )
-            all_bars.update({bar["ts"]: bar for bar in older})
+            all_bars.update({bar["trade_datetime"]: bar for bar in older})
 
     bars = [all_bars[key] for key in sorted(all_bars)]
-    saved = upsert_rows(conn, table, MINUTE_COLUMNS, "ts", bars)
+    saved = upsert_rows(conn, table, MINUTE_COLUMNS, "trade_datetime", bars)
 
-    new_first, new_last = get_ts_bounds(conn, table)
+    new_first, new_last = get_datetime_bounds(conn, table)
     update_meta(conn, product_key, "1m", table, symbol or "", new_last)
-    return symbol or "", saved, new_first, new_last, first_ts, last_ts
+    return symbol or "", saved, new_first, new_last, first_dt, last_dt
 
 
 def sync_daily_product(
