@@ -11,7 +11,6 @@ DB_DIR = Path(__file__).resolve().parent.parent.parent / "db"
 DB_PATH = DB_DIR / "trailing.db"  # legacy; 신규는 db_path_for(profile) 사용
 
 STATUS_STOPPED = "stopped"
-STATUS_IDLE = STATUS_STOPPED  # legacy alias
 STATUS_WATCHING = "watching"
 STATUS_TRIGGERED = "triggered"
 STATUS_CLOSING = "closing"
@@ -241,12 +240,6 @@ def upsert_position(conn: sqlite3.Connection, data: dict) -> None:
     )
 
 
-def _compute_stop(side: str, extreme: float, trail_points: float) -> float:
-    if side == "long":
-        return extreme - trail_points
-    return extreme + trail_points
-
-
 def start_trailing(
     conn: sqlite3.Connection,
     symbol: str,
@@ -350,35 +343,26 @@ def update_strategy(
     conn: sqlite3.Connection,
     symbol: str,
     *,
-    trail_points: float | None = None,
-    enabled: bool | None = None,
+    trail_points: float,
 ) -> None:
     row = get_position(conn, symbol)
     if not row:
         raise KeyError(f"트레일 포지션 없음: {symbol}")
     if is_close_pending(row):
         raise RuntimeError("청산 진행 중에는 전략을 바꿀 수 없습니다.")
-    if trail_points is not None:
-        row["trail_points"] = float(trail_points)
-        extreme = row.get("extreme_price")
-        if extreme is not None:
-            if row["side"] == "long":
-                row["stop_price"] = float(extreme) - float(trail_points)
-            else:
-                row["stop_price"] = float(extreme) + float(trail_points)
-    if enabled is not None:
-        row["enabled"] = enabled
-        if enabled:
-            if row.get("status") in (STATUS_ERROR, STATUS_STOPPED, STATUS_CLOSED, "idle"):
-                row["status"] = STATUS_WATCHING
+    row["trail_points"] = float(trail_points)
+    extreme = row.get("extreme_price")
+    if extreme is not None:
+        if row["side"] == "long":
+            row["stop_price"] = float(extreme) - float(trail_points)
         else:
-            row["status"] = STATUS_STOPPED
+            row["stop_price"] = float(extreme) + float(trail_points)
     row["updated_at"] = _now()
     upsert_position(conn, row)
     add_event(
         conn,
         "strategy_update",
-        f"trail_points={row['trail_points']}, enabled={bool(row['enabled'])}",
+        f"trail_points={row['trail_points']}",
         symbol=symbol,
     )
 

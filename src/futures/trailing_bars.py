@@ -52,10 +52,9 @@ def refresh_bar_extreme(
     bar_extreme: float | None,
     bar_cursor_datetime: str | None,
     conn: sqlite3.Connection,
-    session: str | None = None,
     now: datetime | None = None,
 ) -> tuple[float | None, str | None]:
-    """futures.db의 완결 1분봉 종가로 extreme(C)와 커서를 갱신한다."""
+    """완결 1분봉 종가로 bar extreme과 커서를 갱신한다."""
     now = now or datetime.now()
     product_key = product_key_for_symbol(symbol)
     if not product_key:

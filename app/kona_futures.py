@@ -231,7 +231,7 @@ def _display_status(row: dict) -> str:
         return status
     if not row.get("trailing"):
         return STATUS_STOPPED
-    if status in ("idle", STATUS_STOPPED, ""):
+    if status in (STATUS_STOPPED, ""):
         return "watching"
     return status
 
@@ -542,10 +542,9 @@ def _render_strategy_panel(conn, row: dict, profile: str) -> None:
         return
 
     live = tdb.get_position(conn, symbol) or {}
-    status = str(live.get("status") or row.get("status") or "")
-    if tdb.is_close_pending(live) or status in (tdb.STATUS_TRIGGERED, tdb.STATUS_CLOSING):
+    if tdb.is_close_pending(live) or tdb.is_close_pending(row):
         st.warning("청산 진행 중 — 체결이 끝난 뒤에 감시 중지/재시작할 수 있습니다.")
-        st.caption(f"상태: {status}")
+        st.caption(f"상태: {live.get('status') or row.get('status')}")
         return
 
     enabled = bool(live.get("enabled")) if live else bool(row.get("trailing"))
@@ -806,10 +805,6 @@ def _render_activity_board(profile: str) -> None:
 
 
 def main() -> None:
-    import importlib
-
-    importlib.reload(tdb)
-
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
     st.html(_positions_table_style())
     require_login()

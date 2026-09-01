@@ -70,13 +70,7 @@ def parse_args() -> argparse.Namespace:
         "--bar-interval",
         type=int,
         default=BAR_INTERVAL_SEC,
-        help=f"분봉 갱신 주기(초). 기본 {BAR_INTERVAL_SEC} (매분 0초)",
-    )
-    parser.add_argument(
-        "--interval",
-        type=int,
-        default=None,
-        help="(호환) 현재가 주기. --price-interval과 같음",
+        help=f"분봉 갱신 주기(초). 기본 {BAR_INTERVAL_SEC}",
     )
     return parser.parse_args()
 
@@ -161,7 +155,7 @@ def main() -> int:
     else:
         register_worker_pid_lifecycle()
 
-    price_interval = max(2, int(args.interval or args.price_interval))
+    price_interval = max(2, int(args.price_interval))
     bar_interval = max(5, int(args.bar_interval))
     profile = args.profile or get_active_profile()
     print(

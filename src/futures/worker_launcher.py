@@ -106,10 +106,6 @@ def register_worker_pid_lifecycle() -> None:
 
 
 def start_worker(profile: str | None = None, *, dry_run: bool = False) -> bool:
-    """백그라운드 워커 프로세스를 시작한다. 이미 실행 중이면 False.
-
-    실제 단일 기동은 자식 프로세스의 flock이 보장한다.
-    """
     if worker_process_alive():
         return False
 
@@ -117,7 +113,7 @@ def start_worker(profile: str | None = None, *, dry_run: bool = False) -> bool:
     DB_DIR.mkdir(parents=True, exist_ok=True)
     log_handle = open(LOG_PATH, "a", encoding="utf-8")
 
-    cmd = [sys.executable, str(_WORKER_SCRIPT), "--immediate"]
+    cmd = [sys.executable, str(_WORKER_SCRIPT), "--immediate", "--profile", profile]
     if dry_run:
         cmd.append("--dry-run")
 
@@ -127,7 +123,7 @@ def start_worker(profile: str | None = None, *, dry_run: bool = False) -> bool:
         f"{src_dir}{os.pathsep}{env['PYTHONPATH']}" if env.get("PYTHONPATH") else src_dir
     )
 
-    proc = subprocess.Popen(
+    subprocess.Popen(
         cmd,
         cwd=str(_PROJECT_ROOT),
         env=env,

@@ -33,7 +33,12 @@ from .futures_products import (
     product_key_for_symbol,
 )
 from telegram_notify import notify_liquidation
-from .trailing_bars import build_trail_snapshot, combine_extreme, refresh_bar_extreme
+from .trailing_bars import (
+    build_trail_snapshot,
+    combine_extreme,
+    compute_stop,
+    refresh_bar_extreme,
+)
 from . import trailing_db as tdb
 
 
@@ -66,12 +71,6 @@ def _symbol_from_balance(row: dict) -> str:
         if symbol:
             return symbol
     raise ValueError(f"종목코드를 알 수 없습니다: {row}")
-
-
-def _compute_stop(side: str, extreme: float, trail_points: float) -> float:
-    if side == "long":
-        return extreme - trail_points
-    return extreme + trail_points
 
 
 def _is_triggered(side: str, price: float, stop: float) -> bool:
@@ -205,66 +204,42 @@ def _fetch_price(profile: str, symbol: str, session: str, token: str) -> float:
 
 
 def _compute_watch_extreme(
-    profile: str,
-    symbol: str,
-    side: str,
     row: dict,
     live: dict,
     *,
-    token: str,
     fut_conn: sqlite3.Connection,
-    session: str,
     now: datetime,
-    last_price: float | None = None,
+    last_price: float,
 ) -> tuple[float, float, float | None, str | None, float | None]:
-    """b=현재가, c=1분봉 종가 누적 → extreme 및 bar 상태 반환."""
     entry_price = _entry_from_balance(live["raw"]) or _to_float(row.get("entry_price"))
     bar_extreme, bar_cursor = refresh_bar_extreme(
-        symbol,
-        side,
+        row["symbol"],
+        row["side"],
         bar_extreme=_to_float(row.get("bar_extreme")),
         bar_cursor_datetime=row.get("bar_cursor_datetime"),
         conn=fut_conn,
-        session=session,
         now=now,
     )
-    price = last_price if last_price is not None else _fetch_price(
-        profile, symbol, session, token
-    )
     extreme = combine_extreme(
-        side,
-        price,
+        row["side"],
+        last_price,
         bar_extreme,
         prev_extreme=_to_float(row.get("extreme_price")),
     )
-    return extreme, price, bar_extreme, bar_cursor, entry_price
+    return extreme, last_price, bar_extreme, bar_cursor, entry_price
 
 
 def _refresh_last_price_only(
     conn,
-    profile: str,
     row: dict,
     live: dict,
-    *,
-    token: str,
-    session: str,
-    last_price: float | None = None,
+    last_price: float,
 ) -> None:
-    """트레일이 꺼진 보유 종목도 현재가만 가격 주기로 갱신."""
-    try:
-        price = (
-            last_price
-            if last_price is not None
-            else _fetch_price(profile, live["symbol"], session, token)
-        )
-    except Exception as exc:
-        tdb.add_event(conn, "price_error", str(exc), symbol=live["symbol"])
-        return
     tdb.upsert_position(
         conn,
         {
             **row,
-            "last_price": price,
+            "last_price": last_price,
             "qty": live["qty"],
             "entry_price": _entry_from_balance(live["raw"]) or row.get("entry_price"),
             "enabled": False,
@@ -351,7 +326,7 @@ def _advance_close(
     actions: list[dict],
     allow_unverified_resubmit: bool = False,
 ) -> None:
-    """청산: 미확인·살아있는 주문은 조회만. 1분 잔고에서 미체결이 확인된 뒤에만 재주문."""
+    """청산: 미확인 주문은 조회만. 1분 잔고에서 없을 때만 재주문."""
     symbol = row["symbol"]
     if dry_run:
         tdb.upsert_position(
@@ -516,7 +491,6 @@ def _submit_close_order(
     actions: list[dict],
     event_kind: str = "order_sent",
 ) -> None:
-    """시장가 청산 1회. 전송 전에 미확인으로 표시하고, 응답이 불확실하면 재전송하지 않는다."""
     symbol = row["symbol"]
     pending = {
         **row,
@@ -748,15 +722,7 @@ def _run_price_tick(
         price = prices.get(symbol)
         if not row.get("enabled"):
             if price is not None:
-                _refresh_last_price_only(
-                    conn,
-                    profile,
-                    row,
-                    live,
-                    token=token,
-                    session=session,
-                    last_price=price,
-                )
+                _refresh_last_price_only(conn, row, live, last_price=price)
             continue
         if price is None:
             continue
@@ -764,14 +730,9 @@ def _run_price_tick(
         try:
             extreme, price, bar_extreme, bar_cursor, entry_price = (
                 _compute_watch_extreme(
-                    profile,
-                    symbol,
-                    row["side"],
                     row,
                     live,
-                    token=token,
                     fut_conn=fut_conn,
-                    session=session,
                     now=now,
                     last_price=price,
                 )
@@ -786,7 +747,7 @@ def _run_price_tick(
 
         trail_points = float(row["trail_points"])
         side = row["side"]
-        stop = _compute_stop(side, extreme, trail_points)
+        stop = compute_stop(side, extreme, trail_points)
         triggered = _is_triggered(side, price, stop)
 
         updated = {
@@ -866,11 +827,7 @@ def run_once(
     db_path=None,
     jobs: tuple[str, ...] = ("bars", "price"),
 ) -> dict:
-    """한 웨이크. jobs에 catchup_day/night, bars, price를 넣는다.
-
-    bars: 분봉 동기화 후 잔고/자산 스냅샷을 DB에 저장.
-    price: 보유 종목 현재가만 조회해 DB에 저장하고 트레일을 감시.
-    """
+    """한 웨이크. jobs: catchup_day/night, bars, price."""
     do_catchup_day = "catchup_day" in jobs
     do_catchup_night = "catchup_night" in jobs
     do_bars = "bars" in jobs

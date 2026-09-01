@@ -33,14 +33,10 @@ def _as_dict(value) -> dict:
 
 
 def _has_position(row: dict) -> bool:
-    qty = str(row.get("cblc_qty", "")).strip()
-    if qty and qty not in ("0", "0.0"):
-        return True
-    return bool(
-        str(row.get("pdno", "")).strip()
-        or str(row.get("prdt_name", "")).strip()
-        or str(row.get("shtn_pdno", "")).strip()
-    )
+    try:
+        return float(str(row.get("cblc_qty") or "0").replace(",", "")) > 0
+    except (TypeError, ValueError):
+        return False
 
 
 def _tr_id(profile: str) -> str:

@@ -29,7 +29,7 @@ def telegram_config() -> dict:
 def destination_chat_ids(cfg: dict | None = None) -> list[str]:
     cfg = cfg or telegram_config()
     dests: list[str] = []
-    for key in ("chat_id", "user_chat_id"):
+    for key in ("user_chat_id", "chat_id"):
         value = str(cfg.get(key) or "").strip()
         if value and value not in dests:
             dests.append(value)
@@ -77,11 +77,8 @@ def format_liquidation(
     stop_price=None,
     extreme_price=None,
     trail_points=None,
-    sample: bool = False,
 ) -> str:
     title = _TITLES.get(kind, "KONA 알림")
-    if sample:
-        title = f"{title} [예시]"
     name = (prdt_name or product or symbol).strip()
     side_ko = _SIDE_KO.get(side, side or "-")
     account = PROFILE_KIND.get(profile, profile)
@@ -112,41 +109,10 @@ def format_liquidation(
 
 
 def notify_liquidation(**payload) -> None:
-    """워커용. 실패해도 예외를 올리지 않는다."""
     try:
         send_telegram(format_liquidation(**payload))
     except Exception as exc:
         print(f"telegram notify failed: {exc}", flush=True)
-
-
-def bot_identity(token: str | None = None) -> dict:
-    token = token or telegram_config()["bot_token"]
-    if not token:
-        raise RuntimeError("cfg/config.yml telegram.bot_token 이 없습니다.")
-    return _api(token, "getMe")
-
-
-def discover_chat_id(token: str | None = None) -> str | None:
-    token = token or telegram_config()["bot_token"]
-    updates = _api(token, "getUpdates", {"limit": 50, "timeout": 0})
-    for item in reversed(updates or []):
-        for key in ("channel_post", "my_chat_member", "message", "edited_channel_post"):
-            chat = (item.get(key) or {}).get("chat") or {}
-            if chat.get("type") in ("channel", "supergroup", "group"):
-                chat_id = chat.get("id")
-                if chat_id is not None:
-                    return str(chat_id)
-    return None
-
-
-def discover_user_chat_id(token: str | None = None) -> str | None:
-    token = token or telegram_config()["bot_token"]
-    updates = _api(token, "getUpdates", {"limit": 100, "timeout": 0})
-    for item in reversed(updates or []):
-        chat = (item.get("message") or {}).get("chat") or {}
-        if chat.get("type") == "private" and chat.get("id") is not None:
-            return str(chat["id"])
-    return None
 
 
 def send_telegram(text: str, *, chat_id: str | None = None) -> list[dict]:
@@ -156,13 +122,7 @@ def send_telegram(text: str, *, chat_id: str | None = None) -> list[dict]:
         raise RuntimeError("cfg/config.yml telegram.bot_token 이 없습니다.")
     dests = [chat_id] if chat_id else destination_chat_ids(cfg)
     if not dests:
-        found = discover_user_chat_id(token)
-        dests = [found] if found else []
-    if not dests:
-        raise RuntimeError(
-            "telegram.user_chat_id 가 없습니다. "
-            "@fransis_kona_bot 에 /start 를 보낸 뒤 다시 저장해 주세요."
-        )
+        raise RuntimeError("cfg/config.yml telegram.user_chat_id 가 없습니다.")
     sent: list[dict] = []
     errors: list[str] = []
     for dest in dests:

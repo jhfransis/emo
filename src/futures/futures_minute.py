@@ -8,13 +8,10 @@ from datetime import datetime, time, timedelta
 from kis_client import api_get, issue_access_token, load_profile
 
 from .futures_products import (
-    PRODUCTS,
     SESSION_DAY,
     SESSION_NIGHT,
-    market_div_for,
     market_div_for_session,
 )
-from .futures_symbols import resolve_symbol
 
 MINUTE_TR_ID = "FHKIF03020200"
 MAX_BARS_PER_CALL = 102
@@ -22,17 +19,9 @@ API_SLEEP_SEC = 0.35
 
 
 def completed_cutoff(now: datetime | None = None) -> datetime:
-    """마지막으로 완성된 1분봉 시각.
-
-    12:03:30이면 12:03봉은 아직 미완결이므로 cutoff는 12:02:00.
-    trade_datetime 이 이 시각 이하인 봉만 DB에 저장한다.
-    """
+    """마지막 완결 1분봉 시각. 12:03:30이면 12:02:00."""
     now = now or datetime.now()
     return now.replace(second=0, microsecond=0) - timedelta(minutes=1)
-
-
-def completed_cutoff_key(now: datetime | None = None) -> str:
-    return completed_cutoff(now).strftime("%Y%m%d%H%M%S")
 
 
 DAY_OPEN = time(8, 45)
@@ -296,72 +285,6 @@ def download_minute_for_symbol(
         stop_on_empty=stop_on_empty,
         night=(session == "night"),
     )
-
-
-def download_minute_backward(
-    profile: str,
-    product_key: str,
-    mode: str,
-    end_dt: datetime,
-    until_datetime: str | None = None,
-    token: str | None = None,
-    symbol: str | None = None,
-    paginate: bool = True,
-    verbose: bool = False,
-    stop_on_empty: bool = False,
-) -> tuple[str, list[dict]]:
-    """end_dt부터 과거 방향으로 분봉 수집.
-
-    until_datetime이 있으면 해당 시각(포함)까지, 없으면 서버가 더 이상 주지 않을 때까지.
-    paginate=False이면 1회 호출분만 수집.
-    """
-    cfg = load_profile(profile)
-    appkey = cfg["appkey"]
-    appsecret = cfg["seckey"]
-
-    product = PRODUCTS[product_key]
-    market_div = market_div_for(product_key)
-
-    if token is None:
-        token = issue_access_token(profile, appkey, appsecret)["access_token"]
-    if symbol is None:
-        symbol = resolve_symbol(
-            profile, token, appkey, appsecret, product_key, mode, "1m"
-        )
-
-    if mode == "continuous":
-        symbol_candidates = list(
-            dict.fromkeys([symbol, *product.get("continuous_1m", ())])
-        )
-    else:
-        symbol_candidates = [symbol]
-
-    last_error: Exception | None = None
-    for candidate in symbol_candidates:
-        try:
-            symbol, bars = _download_minute_backward_symbol(
-                profile,
-                appkey,
-                appsecret,
-                token,
-                candidate,
-                market_div,
-                end_dt,
-                until_datetime=until_datetime,
-                paginate=paginate,
-                verbose=verbose,
-                stop_on_empty=stop_on_empty,
-            )
-            return symbol, bars
-        except Exception as exc:
-            last_error = exc
-            if verbose:
-                print(f"    [1m] {candidate} 실패: {exc}", flush=True)
-            continue
-
-    if last_error:
-        raise last_error
-    return symbol, []
 
 
 def _download_minute_backward_symbol(
