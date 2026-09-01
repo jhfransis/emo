@@ -14,7 +14,6 @@ from kis_client import (
     issue_access_token,
     load_profile,
 )
-import requests
 
 ORDER_PATH = "/uapi/domestic-futureoption/v1/trading/order"
 CCNL_PATH = "/uapi/domestic-futureoption/v1/trading/inquire-ccnl"
@@ -50,6 +49,16 @@ def order_tr_id(profile: str, night: bool | None = None) -> str:
     return "VTTO1101U" if profile in MOCK_PROFILES else "TTTO1101U"
 
 
+def close_sll_buy_cd(side: str) -> str:
+    """포지션 side에 대한 청산 주문 매매구분. 롱→매도(01), 숏→매수(02)."""
+    side_norm = side.strip().lower()
+    if side_norm in ("long", "buy", "매수"):
+        return "01"
+    if side_norm in ("short", "sell", "매도"):
+        return "02"
+    raise ValueError(f"알 수 없는 side: {side}")
+
+
 def close_position_market(
     profile: str,
     symbol: str,
@@ -62,13 +71,7 @@ def close_position_market(
     if qty_int <= 0:
         raise ValueError(f"청산 수량이 올바르지 않습니다: {qty}")
 
-    side_norm = side.strip().lower()
-    if side_norm in ("long", "buy", "매수"):
-        sll_buy = "01"  # 매도 청산
-    elif side_norm in ("short", "sell", "매도"):
-        sll_buy = "02"  # 매수 청산
-    else:
-        raise ValueError(f"알 수 없는 side: {side}")
+    sll_buy = close_sll_buy_cd(side)
 
     cfg = load_profile(profile)
     appkey = cfg["appkey"]
@@ -179,35 +182,51 @@ def _ccnl_tr(profile: str, night: bool) -> tuple[str, str]:
     return tr_id, CCNL_PATH
 
 
-def fetch_order_fill(
-    profile: str,
-    order_no: str,
-    *,
-    symbol: str | None = None,
-    token: str | None = None,
-    now: datetime | None = None,
-) -> dict | None:
-    """주문번호의 체결·잔량. 아직 조회되지 않으면 None."""
-    order_no = str(order_no or "").strip()
-    if not order_no:
+def _pdno_matches(row: dict, symbol_norm: str) -> bool:
+    if not symbol_norm:
+        return True
+    pdno = str(row.get("pdno") or row.get("shtn_pdno") or "").strip().upper()
+    if not pdno:
+        return False
+    return symbol_norm in pdno or pdno in symbol_norm
+
+
+def _row_sll_buy_cd(row: dict) -> str:
+    return str(
+        row.get("sll_buy_dvsn_cd")
+        or row.get("SLL_BUY_DVSN_CD")
+        or ""
+    ).strip()
+
+
+def _row_order_datetime(row: dict) -> datetime | None:
+    date_s = str(row.get("ord_dt") or row.get("ORD_DT") or "").strip()
+    time_s = str(row.get("ord_tmd") or row.get("ORD_TMD") or "").strip()
+    if len(date_s) != 8:
+        return None
+    time_s = time_s.zfill(6)[:6]
+    try:
+        return datetime.strptime(date_s + time_s, "%Y%m%d%H%M%S")
+    except ValueError:
         return None
 
-    now = now or datetime.now()
+
+def _iter_ccnl_rows(
+    profile: str,
+    *,
+    token: str,
+    now: datetime,
+):
     night = is_night_session(now)
     cfg = load_profile(profile)
     appkey = cfg["appkey"]
     appsecret = cfg["seckey"]
     cano, acnt_prdt_cd = account_parts(cfg)
-    if token is None:
-        token = issue_access_token(profile, appkey, appsecret)["access_token"]
-
     tr_id, path = _ccnl_tr(profile, night)
     start_dt, end_dt = _ccnl_date_range(now)
     fk = ""
     nk = ""
     tr_cont = ""
-    symbol_norm = str(symbol or "").strip().upper()
-
     for _ in range(MAX_CCNL_PAGES):
         params = {
             "CANO": cano,
@@ -237,16 +256,76 @@ def fetch_order_fill(
             tr_cont=tr_cont,
         )
         for row in _as_list(data.get("output1")):
-            if not same_order_no(row.get("odno") or row.get("ODNO"), order_no):
-                continue
-            pdno = str(row.get("pdno") or row.get("shtn_pdno") or "").strip().upper()
-            if symbol_norm and pdno and symbol_norm not in pdno and pdno not in symbol_norm:
-                continue
-            return parse_order_fill(row)
+            yield row
         if next_cont in ("M", "F"):
             fk = str(data.get("ctx_area_fk200") or "")
             nk = str(data.get("ctx_area_nk200") or "")
             tr_cont = "N"
             continue
         break
+
+
+def fetch_order_fill(
+    profile: str,
+    order_no: str,
+    *,
+    symbol: str | None = None,
+    token: str | None = None,
+    now: datetime | None = None,
+) -> dict | None:
+    """주문번호의 체결·잔량. 아직 조회되지 않으면 None."""
+    order_no = str(order_no or "").strip()
+    if not order_no:
+        return None
+
+    now = now or datetime.now()
+    cfg = load_profile(profile)
+    if token is None:
+        token = issue_access_token(
+            profile, cfg["appkey"], cfg["seckey"]
+        )["access_token"]
+    symbol_norm = str(symbol or "").strip().upper()
+    for row in _iter_ccnl_rows(profile, token=token, now=now):
+        if not same_order_no(row.get("odno") or row.get("ODNO"), order_no):
+            continue
+        pdno = str(row.get("pdno") or row.get("shtn_pdno") or "").strip().upper()
+        if symbol_norm and pdno and not _pdno_matches(row, symbol_norm):
+            continue
+        return parse_order_fill(row)
+    return None
+
+
+def find_recent_close_fill(
+    profile: str,
+    symbol: str,
+    side: str,
+    *,
+    token: str | None = None,
+    now: datetime | None = None,
+    since: datetime | None = None,
+) -> dict | None:
+    """해당 종목 청산방향 체결 중 가장 최근 건(DS 정렬). since 이전이면 건너뛴다."""
+    symbol_norm = str(symbol or "").strip().upper()
+    if not symbol_norm:
+        return None
+    now = now or datetime.now()
+    cfg = load_profile(profile)
+    if token is None:
+        token = issue_access_token(
+            profile, cfg["appkey"], cfg["seckey"]
+        )["access_token"]
+    want_side = close_sll_buy_cd(side)
+    cutoff = since - timedelta(minutes=2) if since is not None else None
+    for row in _iter_ccnl_rows(profile, token=token, now=now):
+        if _row_sll_buy_cd(row) != want_side:
+            continue
+        if not _pdno_matches(row, symbol_norm):
+            continue
+        if cutoff is not None:
+            ordered_at = _row_order_datetime(row)
+            if ordered_at is not None and ordered_at < cutoff:
+                continue
+        fill = parse_order_fill(row)
+        if fill["order_no"]:
+            return fill
     return None

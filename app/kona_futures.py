@@ -226,10 +226,12 @@ def _trail_map(conn) -> dict[str, dict]:
 
 
 def _display_status(row: dict) -> str:
+    status = str(row.get("status") or "")
+    if status in (tdb.STATUS_TRIGGERED, tdb.STATUS_CLOSING):
+        return status
     if not row.get("trailing"):
         return STATUS_STOPPED
-    status = str(row.get("status") or "watching")
-    if status in ("idle", STATUS_STOPPED):
+    if status in ("idle", STATUS_STOPPED, ""):
         return "watching"
     return status
 
@@ -257,7 +259,6 @@ def _build_position_row(held: dict, trail: dict) -> dict:
     last = _to_number(held.get("last_price"))
     if last is None:
         last = _to_number(trail.get("last_price"))
-    trailing = bool(trailable and trail.get("enabled"))
     qty = _to_number(held.get("qty"))
     entry_pt, entry_pnl = _entry_pnl(
         side=side,
@@ -269,6 +270,9 @@ def _build_position_row(held: dict, trail: dict) -> dict:
     prdt_name = str(held.get("prdt_name") or trail.get("prdt_name") or "-")
     base_name, contract_label = _parse_prdt_name(prdt_name)
     stop = _to_number(trail.get("stop_price"))
+    status_raw = str(trail.get("status") or "")
+    close_pending = status_raw in (tdb.STATUS_TRIGGERED, tdb.STATUS_CLOSING)
+    trailing = bool(trailable and (trail.get("enabled") or close_pending))
     return {
         "symbol": symbol,
         "trailable": trailable,
@@ -289,10 +293,11 @@ def _build_position_row(held: dict, trail: dict) -> dict:
         "extreme": _to_number(trail.get("extreme_price")),
         "stop": stop,
         "stop_remaining": _stop_remaining(side, last, stop),
+        "close_pending": close_pending,
         "status": _display_status(
             {
                 "trailing": trailing,
-                "status": trail.get("status"),
+                "status": status_raw,
             }
         ),
     }
@@ -536,7 +541,15 @@ def _render_strategy_panel(conn, row: dict, profile: str) -> None:
         st.info("KOSPI/KOSDAQ 선물만 트레일링할 수 있습니다.")
         return
 
-    if row["trailing"]:
+    live = tdb.get_position(conn, symbol) or {}
+    status = str(live.get("status") or row.get("status") or "")
+    if tdb.is_close_pending(live) or status in (tdb.STATUS_TRIGGERED, tdb.STATUS_CLOSING):
+        st.warning("청산 진행 중 — 체결이 끝난 뒤에 감시 중지/재시작할 수 있습니다.")
+        st.caption(f"상태: {status}")
+        return
+
+    enabled = bool(live.get("enabled")) if live else bool(row.get("trailing"))
+    if enabled:
         trail_points = st.number_input(
             "추적폭 (pt)",
             min_value=0.01,
@@ -553,13 +566,19 @@ def _render_strategy_panel(conn, row: dict, profile: str) -> None:
             update_clicked = st.button("Update", key=f"update_{symbol}", width="stretch")
             stop_clicked = st.button("Stop", key=f"stop_{symbol}", width="stretch")
         if update_clicked:
-            tdb.update_strategy(conn, symbol, trail_points=float(trail_points))
-            conn.commit()
-            st.rerun()
+            try:
+                tdb.update_strategy(conn, symbol, trail_points=float(trail_points))
+            except RuntimeError as exc:
+                st.error(str(exc))
+            else:
+                conn.commit()
+                st.rerun()
         if stop_clicked:
-            tdb.stop_trailing(conn, symbol)
-            conn.commit()
-            st.rerun()
+            if not tdb.stop_trailing(conn, symbol):
+                st.error("청산 진행 중에는 감시를 중지할 수 없습니다.")
+            else:
+                conn.commit()
+                st.rerun()
     else:
         c1, c2 = st.columns([2, 1])
         with c1:
@@ -588,9 +607,6 @@ def _render_strategy_panel(conn, row: dict, profile: str) -> None:
                             trail_points=float(trail_points),
                             sync_bars=False,
                         )
-                    except Exception as exc:
-                        st.error(f"스톱가 계산 실패: {exc}")
-                    else:
                         tdb.start_trailing(
                             conn,
                             symbol,
@@ -602,6 +618,9 @@ def _render_strategy_panel(conn, row: dict, profile: str) -> None:
                             entry_price=row.get("entry"),
                             snapshot=snapshot,
                         )
+                    except Exception as exc:
+                        st.error(str(exc))
+                    else:
                         conn.commit()
                         st.rerun()
 
@@ -759,6 +778,21 @@ def _render_live_board(profile: str, account_label_text: str) -> None:
 
 
 @st.fragment(run_every=LIVE_REFRESH_SEC)
+def _render_strategy_board(profile: str) -> None:
+    conn = tdb.connect(profile=profile)
+    try:
+        tdb.init_db(conn)
+        _, position_rows = _load_board(conn)
+        trailable_rows = [row for row in position_rows if row.get("trailable")]
+        if not trailable_rows:
+            return
+        st.subheader("Strategy")
+        _render_strategy_section(conn, trailable_rows, profile)
+    finally:
+        conn.close()
+
+
+@st.fragment(run_every=LIVE_REFRESH_SEC)
 def _render_activity_board(profile: str) -> None:
     conn = tdb.connect(profile=profile)
     try:
@@ -786,14 +820,9 @@ def main() -> None:
     conn = tdb.connect(profile=profile)
     tdb.init_db(conn)
     _render_page_header(conn, profile)
-    _render_live_board(profile, label)
-
-    _, position_rows = _load_board(conn)
-    trailable_rows = [row for row in position_rows if row.get("trailable")]
-    if trailable_rows:
-        st.subheader("Strategy")
-        _render_strategy_section(conn, trailable_rows, profile)
     conn.close()
+    _render_live_board(profile, label)
+    _render_strategy_board(profile)
     _render_activity_board(profile)
     st.divider()
     render_logout_button()

@@ -17,8 +17,15 @@ STATUS_TRIGGERED = "triggered"
 STATUS_CLOSING = "closing"
 STATUS_CLOSED = "closed"
 STATUS_ERROR = "error"
+CLOSE_PENDING_STATUSES = (STATUS_TRIGGERED, STATUS_CLOSING)
 
 WORKER_STALE_SEC = 90
+
+
+def is_close_pending(row: dict | None) -> bool:
+    if not row:
+        return False
+    return str(row.get("status") or "") in CLOSE_PENDING_STATUSES
 
 
 def db_path_for(profile: str) -> Path:
@@ -72,6 +79,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             status TEXT NOT NULL,
             last_order_no TEXT,
             order_unverified INTEGER NOT NULL DEFAULT 0,
+            close_submitted_at TEXT,
             updated_at TEXT NOT NULL
         );
 
@@ -118,6 +126,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             "bar_extreme": "REAL",
             "bar_cursor_datetime": "TEXT",
             "order_unverified": "INTEGER DEFAULT 0",
+            "close_submitted_at": "TEXT",
         },
     )
     conn.commit()
@@ -194,6 +203,7 @@ def upsert_position(conn: sqlite3.Connection, data: dict) -> None:
         "status": data.get("status") or STATUS_STOPPED,
         "last_order_no": data.get("last_order_no") or "",
         "order_unverified": 1 if data.get("order_unverified") else 0,
+        "close_submitted_at": data.get("close_submitted_at") or None,
         "updated_at": data.get("updated_at") or _now(),
     }
     conn.execute(
@@ -202,12 +212,12 @@ def upsert_position(conn: sqlite3.Connection, data: dict) -> None:
             symbol, prdt_name, side, qty, enabled, trail_points,
             entry_price, bar_extreme, bar_cursor_datetime,
             extreme_price, stop_price, last_price, status, last_order_no,
-            order_unverified, updated_at
+            order_unverified, close_submitted_at, updated_at
         ) VALUES (
             :symbol, :prdt_name, :side, :qty, :enabled, :trail_points,
             :entry_price, :bar_extreme, :bar_cursor_datetime,
             :extreme_price, :stop_price, :last_price, :status, :last_order_no,
-            :order_unverified, :updated_at
+            :order_unverified, :close_submitted_at, :updated_at
         )
         ON CONFLICT(symbol) DO UPDATE SET
             prdt_name=excluded.prdt_name,
@@ -224,6 +234,7 @@ def upsert_position(conn: sqlite3.Connection, data: dict) -> None:
             status=excluded.status,
             last_order_no=excluded.last_order_no,
             order_unverified=excluded.order_unverified,
+            close_submitted_at=excluded.close_submitted_at,
             updated_at=excluded.updated_at
         """,
         payload,
@@ -248,6 +259,9 @@ def start_trailing(
     entry_price: float | None = None,
     snapshot: dict | None = None,
 ) -> None:
+    existing = get_position(conn, symbol)
+    if is_close_pending(existing):
+        raise RuntimeError("청산 진행 중에는 트레일을 다시 시작할 수 없습니다.")
     entry = entry_price if entry_price is not None else last_price
     payload = {
         "symbol": symbol,
@@ -264,9 +278,16 @@ def start_trailing(
         "last_price": last_price,
         "status": STATUS_WATCHING,
         "last_order_no": "",
+        "order_unverified": False,
+        "close_submitted_at": None,
     }
     if snapshot:
         payload.update(snapshot)
+        payload["last_order_no"] = ""
+        payload["order_unverified"] = False
+        payload["close_submitted_at"] = None
+        payload["status"] = STATUS_WATCHING
+        payload["enabled"] = True
     upsert_position(conn, payload)
     stop = payload.get("stop_price")
     add_event(
@@ -294,6 +315,7 @@ def close_position_from_balance(conn: sqlite3.Connection, row: dict) -> None:
             "last_price": None,
             "last_order_no": "",
             "order_unverified": False,
+            "close_submitted_at": None,
         },
     )
     add_event(
@@ -304,15 +326,24 @@ def close_position_from_balance(conn: sqlite3.Connection, row: dict) -> None:
     )
 
 
-def stop_trailing(conn: sqlite3.Connection, symbol: str) -> None:
+def stop_trailing(conn: sqlite3.Connection, symbol: str) -> bool:
     row = get_position(conn, symbol)
     if not row:
-        return
+        return False
+    if is_close_pending(row):
+        add_event(
+            conn,
+            "trail_stop_ignored",
+            "청산 진행 중 — 감시 중지를 무시",
+            symbol=symbol,
+        )
+        return False
     row["enabled"] = False
     row["status"] = STATUS_STOPPED
     row["updated_at"] = _now()
     upsert_position(conn, row)
     add_event(conn, "trail_stop", "trailing disabled", symbol=symbol)
+    return True
 
 
 def update_strategy(
@@ -325,6 +356,8 @@ def update_strategy(
     row = get_position(conn, symbol)
     if not row:
         raise KeyError(f"트레일 포지션 없음: {symbol}")
+    if is_close_pending(row):
+        raise RuntimeError("청산 진행 중에는 전략을 바꿀 수 없습니다.")
     if trail_points is not None:
         row["trail_points"] = float(trail_points)
         extreme = row.get("extreme_price")

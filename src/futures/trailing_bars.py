@@ -96,11 +96,14 @@ def combine_extreme(
     side: str,
     current_price: float,
     bar_extreme: float | None,
+    prev_extreme: float | None = None,
 ) -> float:
-    """매수: max(b,c), 매도: min(b,c). 진입가는 extreme에 포함하지 않는다."""
-    values = [current_price]
+    """매수 max / 매도 min. 이전 extreme·현재가·분봉 종가를 누적한다. 진입가는 넣지 않는다."""
+    values = [float(current_price)]
     if bar_extreme is not None:
-        values.append(bar_extreme)
+        values.append(float(bar_extreme))
+    if prev_extreme is not None:
+        values.append(float(prev_extreme))
     if side == "long":
         return max(values)
     return min(values)

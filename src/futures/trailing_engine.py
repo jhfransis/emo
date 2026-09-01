@@ -20,6 +20,7 @@ from .futures_order import (
     OrderUncertainError,
     close_position_market,
     fetch_order_fill,
+    find_recent_close_fill,
     is_night_session,
 )
 from .futures_price import fetch_last_price
@@ -230,7 +231,12 @@ def _compute_watch_extreme(
     price = last_price if last_price is not None else _fetch_price(
         profile, symbol, session, token
     )
-    extreme = combine_extreme(side, price, bar_extreme)
+    extreme = combine_extreme(
+        side,
+        price,
+        bar_extreme,
+        prev_extreme=_to_float(row.get("extreme_price")),
+    )
     return extreme, price, bar_extreme, bar_cursor, entry_price
 
 
@@ -322,6 +328,18 @@ def _is_unverified(row: dict) -> bool:
     return bool(row.get("order_unverified"))
 
 
+def _close_submitted_at(row: dict) -> datetime | None:
+    raw = str(row.get("close_submitted_at") or "").strip()
+    if not raw:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y%m%d%H%M%S"):
+        try:
+            return datetime.strptime(raw, fmt)
+        except ValueError:
+            continue
+    return None
+
+
 def _advance_close(
     conn,
     profile: str,
@@ -331,8 +349,9 @@ def _advance_close(
     token: str,
     dry_run: bool,
     actions: list[dict],
+    allow_unverified_resubmit: bool = False,
 ) -> None:
-    """청산: 미확인·살아있는 주문은 조회만. 거부·소멸이 확인된 뒤에만 재주문."""
+    """청산: 미확인·살아있는 주문은 조회만. 1분 잔고에서 미체결이 확인된 뒤에만 재주문."""
     symbol = row["symbol"]
     if dry_run:
         tdb.upsert_position(
@@ -343,6 +362,7 @@ def _advance_close(
                 "enabled": False,
                 "status": tdb.STATUS_STOPPED,
                 "order_unverified": False,
+                "close_submitted_at": None,
             },
         )
         tdb.add_event(conn, "dry_run", "청산 주문 생략", symbol=symbol)
@@ -369,6 +389,7 @@ def _advance_close(
     order_no = str(row.get("last_order_no") or "").strip()
     unverified = _is_unverified(row)
     fill: dict | None = None
+    retrying = False
 
     if order_no:
         try:
@@ -387,7 +408,11 @@ def _advance_close(
             if unverified:
                 tdb.upsert_position(
                     conn,
-                    {**row, "order_unverified": False, "qty": live["qty"]},
+                    {
+                        **row,
+                        "order_unverified": False,
+                        "qty": live["qty"],
+                    },
                 )
             return
         tdb.add_event(
@@ -400,9 +425,70 @@ def _advance_close(
             ),
             symbol=symbol,
         )
-        row = {**row, "order_unverified": False, "last_order_no": ""}
+        row = {
+            **row,
+            "order_unverified": False,
+            "last_order_no": "",
+        }
     elif unverified:
-        return
+        try:
+            fill = find_recent_close_fill(
+                profile,
+                symbol,
+                str(row.get("side") or live.get("side") or ""),
+                token=token,
+                since=_close_submitted_at(row),
+            )
+        except Exception as exc:
+            tdb.add_event(conn, "order_lookup_error", str(exc), symbol=symbol)
+            return
+        if fill is None:
+            if not allow_unverified_resubmit:
+                return
+            tdb.add_event(
+                conn,
+                "order_unverified_retry",
+                "1분 잔고·체결에 청산 주문 없음 → 재전송",
+                symbol=symbol,
+            )
+            row = {
+                **row,
+                "order_unverified": False,
+                "last_order_no": "",
+            }
+            retrying = True
+        elif fill["working"] or fill["complete"]:
+            tdb.upsert_position(
+                conn,
+                {
+                    **row,
+                    "last_order_no": fill["order_no"],
+                    "order_unverified": False,
+                    "qty": live["qty"],
+                },
+            )
+            tdb.add_event(
+                conn,
+                "order_reconciled",
+                f"order_no={fill['order_no']} working={fill['working']} complete={fill['complete']}",
+                symbol=symbol,
+            )
+            return
+        else:
+            if not allow_unverified_resubmit:
+                return
+            tdb.add_event(
+                conn,
+                "order_unverified_retry",
+                f"order_no={fill['order_no']} 거부/소멸 → 재전송",
+                symbol=symbol,
+            )
+            row = {
+                **row,
+                "order_unverified": False,
+                "last_order_no": "",
+            }
+            retrying = True
 
     qty = _close_qty(live, fill)
     if qty <= 0:
@@ -416,7 +502,7 @@ def _advance_close(
         {**live, "qty": qty},
         token=token,
         actions=actions,
-        event_kind="order_retry" if order_no else "order_sent",
+        event_kind="order_retry" if order_no or retrying else "order_sent",
     )
 
 
@@ -438,6 +524,7 @@ def _submit_close_order(
         "enabled": False,
         "status": tdb.STATUS_CLOSING,
         "order_unverified": True,
+        "close_submitted_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
     tdb.upsert_position(conn, pending)
     conn.commit()
@@ -554,7 +641,15 @@ def _sync_trail_from_live(
             "qty": live["qty"],
             "entry_price": live.get("entry_price") or prev.get("entry_price"),
         }
-        if side_changed:
+        if side_changed and tdb.is_close_pending(prev):
+            updates["side"] = prev["side"]
+            tdb.add_event(
+                conn,
+                "side_changed_ignored",
+                f"{prev['side']} -> {live['side']} 청산 중이라 무시",
+                symbol=symbol,
+            )
+        elif side_changed:
             updates["bar_extreme"] = None
             updates["bar_cursor_datetime"] = None
             updates["extreme_price"] = None
@@ -609,6 +704,7 @@ def _run_price_tick(
     now: datetime,
     dry_run: bool,
     actions: list[dict],
+    allow_unverified_resubmit: bool = False,
 ) -> list[dict]:
     held_rows = tdb.list_held_positions(conn)
     held_by_symbol = {row["symbol"]: row for row in held_rows}
@@ -645,6 +741,7 @@ def _run_price_tick(
                 token=token,
                 dry_run=dry_run,
                 actions=actions,
+                allow_unverified_resubmit=allow_unverified_resubmit,
             )
             continue
 
@@ -725,6 +822,7 @@ def _run_price_tick(
             token=token,
             dry_run=dry_run,
             actions=actions,
+            allow_unverified_resubmit=allow_unverified_resubmit,
         )
     return watching
 
@@ -873,6 +971,7 @@ def run_once(
                 now=now,
                 dry_run=dry_run,
                 actions=actions,
+                allow_unverified_resubmit=do_bars,
             )
 
         tdb.touch_worker_heartbeat(conn, profile, dry_run=dry_run)
