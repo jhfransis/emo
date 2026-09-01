@@ -17,6 +17,8 @@ usage() {
   reset   계좌는 그대로 두고 Streamlit·워커만 재시작
   status  현재 프로필과 데몬 상태만 표시
 
+  mock/real/reset 은 수동 Streamlit·워커도 종료한 뒤 systemd로 다시 올립니다.
+
   --yes   확인 질문 생략 (mock/real)
 
 예: ${ROOT}/deploy/switch-account.sh mock
@@ -102,6 +104,15 @@ resolve_profile() {
   esac
 }
 
+show_leftovers() {
+  local pids
+  pids="$(pgrep -af 'streamlit run app/kona_futures.py|futures/trailing_run.py' || true)"
+  if [[ -n "${pids}" ]]; then
+    echo "수동 프로세스:"
+    echo "${pids}" | sed 's/^/  /'
+  fi
+}
+
 show_status() {
   local current acct
   current="$(python_cfg "${CFG}" get)"
@@ -112,17 +123,57 @@ show_status() {
   st_wk="$(systemctl is-active kona-trailing-worker.service 2>/dev/null || true)"
   echo "streamlit:  ${st_ui:-unknown}"
   echo "worker:     ${st_wk:-unknown}"
+  show_leftovers
+}
+
+stop_leftovers() {
+  echo "기존 프로세스 종료 (systemd + 수동) ..."
+  sudo systemctl stop "${SERVICES[@]}" 2>/dev/null || true
+  pkill -f "streamlit run app/kona_futures.py" 2>/dev/null || true
+  pkill -f "futures/trailing_run.py" 2>/dev/null || true
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    if ! pgrep -f "streamlit run app/kona_futures.py" >/dev/null \
+      && ! pgrep -f "futures/trailing_run.py" >/dev/null; then
+      break
+    fi
+    sleep 0.3
+  done
+  if pgrep -f "streamlit run app/kona_futures.py" >/dev/null \
+    || pgrep -f "futures/trailing_run.py" >/dev/null; then
+    echo "프로세스가 남아 강제 종료합니다." >&2
+    pkill -9 -f "streamlit run app/kona_futures.py" 2>/dev/null || true
+    pkill -9 -f "futures/trailing_run.py" 2>/dev/null || true
+    sleep 0.3
+  fi
+  rm -f "${ROOT}/db/trailing_worker.pid"
+}
+
+wait_active() {
+  local unit="$1"
+  local i state
+  for i in $(seq 1 15); do
+    state="$(systemctl is-active "${unit}" 2>/dev/null || true)"
+    if [[ "${state}" == "active" ]]; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "${unit} 이 active가 아닙니다: $(systemctl is-active "${unit}" 2>/dev/null || true)" >&2
+  journalctl -u "${unit}" -n 15 --no-pager >&2 || true
+  return 1
 }
 
 restart_daemons() {
+  stop_leftovers
   echo "systemd 유닛 설치 후 재시작 ..."
   sudo cp "${UNIT_SRC}/kona-streamlit.service" "${UNIT_DIR}/"
   sudo cp "${UNIT_SRC}/kona-trailing-worker.service" "${UNIT_DIR}/"
   sudo systemctl daemon-reload
-  sudo systemctl restart "${SERVICES[@]}"
-  sleep 2
-  sudo systemctl is-active --quiet kona-streamlit.service
-  sudo systemctl is-active --quiet kona-trailing-worker.service
+  sudo systemctl reset-failed "${SERVICES[@]}" 2>/dev/null || true
+  sudo systemctl start "${SERVICES[@]}"
+  wait_active kona-streamlit.service
+  wait_active kona-trailing-worker.service
   echo "streamlit:  $(systemctl is-active kona-streamlit.service)"
   echo "worker:     $(systemctl is-active kona-trailing-worker.service)"
 }
