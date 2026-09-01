@@ -1,0 +1,6 @@
+[server]
+address = "127.0.0.1"
+port = 18501
+headless = true
+
+# 공유기 8501 포트포워딩과 분리 (Tailscale Serve → 127.0.0.1:18501)

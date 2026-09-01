@@ -7,13 +7,15 @@ from datetime import datetime, timedelta
 
 from kis_client import api_get, issue_access_token, load_profile
 
-from .futures_products import DAILY_START_DATE, market_div_for
+from .futures_products import DAILY_START_DATE, market_div_for, market_div_for_session
 from .futures_symbols import resolve_symbol
 
 DAILY_TR_ID = "FHKIF03020100"
 DAILY_API_PATH = "/uapi/domestic-futureoption/v1/quotations/inquire-daily-fuopchartprice"
 CHUNK_DAYS = 20
 RETRY_SLEEP_SEC = 1.0
+# 만기 이후(월말·야간 만기전날 차이) 빈 청크를 건너뛸 상한. 20일×2 ≈ 40일.
+MAX_LEADING_EMPTY_CHUNKS = 2
 
 
 def fetch_daily_range(
@@ -94,6 +96,82 @@ def _date_add(date_yyyymmdd: str, days: int) -> str:
     return dt.strftime("%Y%m%d")
 
 
+def download_daily_for_symbol(
+    profile: str,
+    product_key: str,
+    symbol: str,
+    start_date: str,
+    end_date: str,
+    token: str | None = None,
+    verbose: bool = False,
+    chunk_backward: bool = False,
+    stop_on_empty: bool = False,
+    *,
+    session: str = "day",
+) -> tuple[str, list[dict]]:
+    """지정 월물(symbol) 일봉 구간 수집."""
+    cfg = load_profile(profile)
+    appkey = cfg["appkey"]
+    appsecret = cfg["seckey"]
+    market_div = market_div_for_session(session)
+
+    if token is None:
+        token = issue_access_token(profile, appkey, appsecret)["access_token"]
+
+    start = max(start_date, DAILY_START_DATE)
+    end = end_date
+    if start > end:
+        return symbol, []
+
+    by_date: dict[str, dict] = {}
+
+    if chunk_backward:
+        by_date.update(
+            _collect_daily_backward(
+                profile,
+                token,
+                appkey,
+                appsecret,
+                symbol,
+                market_div,
+                start,
+                end,
+                stop_on_empty=stop_on_empty,
+                verbose=verbose,
+            )
+        )
+    else:
+        cursor = start
+        chunk = 0
+        while cursor <= end:
+            chunk += 1
+            chunk_end = _date_add(cursor, CHUNK_DAYS - 1)
+            if chunk_end > end:
+                chunk_end = end
+            rows = _fetch_daily_chunk(
+                profile,
+                token,
+                appkey,
+                appsecret,
+                symbol,
+                market_div,
+                cursor,
+                chunk_end,
+                chunk,
+                verbose,
+            )
+            if stop_on_empty and not rows:
+                if verbose:
+                    print(f"    [1d c{chunk}] 0건 → 중단", flush=True)
+                break
+            for row in rows:
+                by_date[row["trade_date"]] = row
+            cursor = _date_add(chunk_end, 1)
+
+    bars = [by_date[key] for key in sorted(by_date)]
+    return symbol, bars
+
+
 def download_daily_range_data(
     profile: str,
     product_key: str,
@@ -127,24 +205,20 @@ def download_daily_range_data(
     by_date: dict[str, dict] = {}
 
     if chunk_backward:
-        cursor = end
-        chunk = 0
-        while cursor >= start:
-            chunk += 1
-            chunk_start = _date_add(cursor, -(CHUNK_DAYS - 1))
-            if chunk_start < start:
-                chunk_start = start
-            rows = _fetch_daily_chunk(
-                profile, token, appkey, appsecret, symbol, market_div,
-                chunk_start, cursor, chunk, verbose,
+        by_date.update(
+            _collect_daily_backward(
+                profile,
+                token,
+                appkey,
+                appsecret,
+                symbol,
+                market_div,
+                start,
+                end,
+                stop_on_empty=stop_on_empty,
+                verbose=verbose,
             )
-            if stop_on_empty and not rows:
-                if verbose:
-                    print(f"    [1d c{chunk}] 0건 → 중단", flush=True)
-                break
-            for row in rows:
-                by_date[row["trade_date"]] = row
-            cursor = _date_add(chunk_start, -1)
+        )
     else:
         cursor = start
         chunk = 0
@@ -163,6 +237,61 @@ def download_daily_range_data(
 
     bars = [by_date[key] for key in sorted(by_date)]
     return symbol, bars
+
+
+def _collect_daily_backward(
+    profile: str,
+    token: str,
+    appkey: str,
+    appsecret: str,
+    symbol: str,
+    market_div: str,
+    start: str,
+    end: str,
+    *,
+    stop_on_empty: bool,
+    verbose: bool,
+) -> dict[str, dict]:
+    """end부터 start까지 역방향 수집. 만기 이후 빈 청크는 건너뛴다."""
+    by_date: dict[str, dict] = {}
+    cursor = end
+    chunk = 0
+    leading_empty = 0
+    while cursor >= start:
+        chunk += 1
+        chunk_start = _date_add(cursor, -(CHUNK_DAYS - 1))
+        if chunk_start < start:
+            chunk_start = start
+        rows = _fetch_daily_chunk(
+            profile,
+            token,
+            appkey,
+            appsecret,
+            symbol,
+            market_div,
+            chunk_start,
+            cursor,
+            chunk,
+            verbose,
+        )
+        if stop_on_empty and not rows:
+            if by_date:
+                if verbose:
+                    print(f"    [1d c{chunk}] 0건 → 중단", flush=True)
+                break
+            leading_empty += 1
+            if leading_empty > MAX_LEADING_EMPTY_CHUNKS:
+                if verbose:
+                    print(f"    [1d c{chunk}] 0건 → 중단", flush=True)
+                break
+            if verbose:
+                print(f"    [1d c{chunk}] 0건 → 만기 이후 skip", flush=True)
+            cursor = _date_add(chunk_start, -1)
+            continue
+        for row in rows:
+            by_date[row["trade_date"]] = row
+        cursor = _date_add(chunk_start, -1)
+    return by_date
 
 
 def _fetch_daily_chunk(

@@ -127,7 +127,11 @@ def resolve_symbol(
     product = PRODUCTS[product_key]
     market_div = market_div_for(product_key)
     if mode == "continuous":
-        codes = product[f"continuous_{interval}"]
+        codes = product.get(f"continuous_{interval}", ())
+        if not codes:
+            raise RuntimeError(
+                f"{product_key}는 연결선물 코드가 없습니다. mode=near 또는 월물 symbol 지정."
+            )
         checker = _has_minute_data if interval == "1m" else _has_daily_data
         for code in codes:
             if checker(profile, token, appkey, appsecret, code, market_div):

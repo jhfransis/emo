@@ -1,0 +1,19 @@
+[Unit]
+Description=KONA Futures trailing stop worker
+After=network-online.target tailscaled.service kona-streamlit.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=fransis
+Group=fransis
+WorkingDirectory=/home/fransis/project/kona
+Environment=HOME=/home/fransis
+Environment=PYTHONPATH=/home/fransis/project/kona/src
+Environment=PATH=/home/fransis/miniforge3/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/fransis/miniforge3/bin/python /home/fransis/project/kona/src/futures/trailing_run.py --immediate
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

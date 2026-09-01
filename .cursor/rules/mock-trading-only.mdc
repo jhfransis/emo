@@ -1,0 +1,12 @@
+---
+description: 모든 KIS API/거래는 모의투자 계좌만 사용
+alwaysApply: true
+---
+
+# 모의투자 전용
+
+- 활성 계좌는 `cfg/config.yml`의 `active_profile`만 사용한다 (기본: `mock_futures`).
+- UI에서 계좌를 바꾸지 않는다. 실전 전환 시 `active_profile: real_futures`로만 변경한다.
+- 기본값은 모의투자(`mock_futures`, 계좌 `60048570`)를 유지한다.
+- CLI `--profile` 기본값·예시·문서도 모의투자로 유지한다.
+- 트레일링 워커/앱은 보조툴이다. 신규 진입 주문은 내지 않고, 스톱 가격 도달 시에만 시장가 청산한다. UI Stop 버튼은 감시만 중단한다.
