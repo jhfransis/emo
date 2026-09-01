@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 모의/실전 계좌 전환 후 Streamlit·트레일링 워커를 재시작한다 (sudo 필요).
+# 모의/실전 계좌 전환, 또는 Streamlit·트레일링 워커만 재시작한다 (sudo 필요).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -10,16 +10,18 @@ SERVICES=(kona-streamlit.service kona-trailing-worker.service)
 
 usage() {
   cat <<EOF
-사용법: $(basename "$0") <mock|real|status> [--yes]
+사용법: $(basename "$0") <mock|real|reset|status> [--yes]
 
   mock    모의투자 (mock_futures) 로 전환 후 데몬 재시작
   real    실전 (real_futures) 로 전환 후 데몬 재시작
+  reset   계좌는 그대로 두고 Streamlit·워커만 재시작
   status  현재 프로필과 데몬 상태만 표시
 
-  --yes   확인 질문 생략
+  --yes   확인 질문 생략 (mock/real)
 
 예: ${ROOT}/deploy/switch-account.sh mock
     ${ROOT}/deploy/switch-account.sh real
+    ${ROOT}/deploy/switch-account.sh reset
 EOF
 }
 
@@ -139,6 +141,9 @@ for arg in "$@"; do
     status)
       TARGET="status"
       ;;
+    reset)
+      TARGET="reset"
+      ;;
     mock|mock_futures|모의|real|real_futures|실전)
       TARGET="${arg}"
       ;;
@@ -159,6 +164,13 @@ require_cfg
 
 if [[ "${TARGET}" == "status" ]]; then
   show_status
+  exit 0
+fi
+
+if [[ "${TARGET}" == "reset" ]]; then
+  show_status
+  restart_daemons
+  echo "완료."
   exit 0
 fi
 
