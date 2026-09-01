@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime, time, timedelta
 
+import requests
+
 from kis_client import (
     MOCK_PROFILES,
     account_parts,
@@ -12,11 +14,16 @@ from kis_client import (
     issue_access_token,
     load_profile,
 )
+import requests
 
 ORDER_PATH = "/uapi/domestic-futureoption/v1/trading/order"
 CCNL_PATH = "/uapi/domestic-futureoption/v1/trading/inquire-ccnl"
 NGT_CCNL_PATH = "/uapi/domestic-futureoption/v1/trading/inquire-ngt-ccnl"
 MAX_CCNL_PAGES = 3
+
+
+class OrderUncertainError(RuntimeError):
+    """주문 전송 후 성공 여부를 알 수 없음. 재전송 금지."""
 
 
 def _as_dict(value) -> dict:
@@ -83,7 +90,10 @@ def close_position_market(
         "KRX_NMPR_CNDT_CD": "0",
         "ORD_DVSN_CD": "02",
     }
-    data = api_post(profile, token, appkey, appsecret, tr_id, ORDER_PATH, body)
+    try:
+        data = api_post(profile, token, appkey, appsecret, tr_id, ORDER_PATH, body)
+    except (requests.Timeout, requests.ConnectionError, requests.HTTPError) as exc:
+        raise OrderUncertainError(str(exc)) from exc
     output = _as_dict(data.get("output"))
     return {
         "order_no": str(output.get("ODNO") or output.get("odno") or ""),

@@ -16,7 +16,12 @@ from kis_client import (
 from .futures_balance import fetch_futures_balance
 from .futures_db import DB_PATH, catchup_listed_session, init_db, sync_minute_symbols_if_needed
 from .futures_minute import current_session
-from .futures_order import close_position_market, fetch_order_fill, is_night_session
+from .futures_order import (
+    OrderUncertainError,
+    close_position_market,
+    fetch_order_fill,
+    is_night_session,
+)
 from .futures_price import fetch_last_price
 from .futures_products import (
     PRODUCTS,
@@ -302,6 +307,21 @@ def _bootstrap_auto_trail(
     )
 
 
+def _close_qty(live: dict, fill: dict | None = None) -> float:
+    live_qty = float(live.get("qty") or 0)
+    if fill:
+        remain = float(fill.get("remain_qty") or 0)
+        if remain > 0:
+            if live_qty > 0:
+                return min(live_qty, remain)
+            return remain
+    return live_qty
+
+
+def _is_unverified(row: dict) -> bool:
+    return bool(row.get("order_unverified"))
+
+
 def _advance_close(
     conn,
     profile: str,
@@ -312,12 +332,18 @@ def _advance_close(
     dry_run: bool,
     actions: list[dict],
 ) -> None:
-    """청산: 살아있는 주문은 체결만 확인하고, 거부·미완일 때만 재주문."""
+    """청산: 미확인·살아있는 주문은 조회만. 거부·소멸이 확인된 뒤에만 재주문."""
     symbol = row["symbol"]
     if dry_run:
         tdb.upsert_position(
             conn,
-            {**row, "qty": live["qty"], "enabled": False, "status": tdb.STATUS_STOPPED},
+            {
+                **row,
+                "qty": live["qty"],
+                "enabled": False,
+                "status": tdb.STATUS_STOPPED,
+                "order_unverified": False,
+            },
         )
         tdb.add_event(conn, "dry_run", "청산 주문 생략", symbol=symbol)
         return
@@ -325,7 +351,12 @@ def _advance_close(
     if is_night_session() and profile.startswith("mock_"):
         tdb.upsert_position(
             conn,
-            {**row, "qty": live["qty"], "status": tdb.STATUS_ERROR},
+            {
+                **row,
+                "qty": live["qty"],
+                "status": tdb.STATUS_ERROR,
+                "order_unverified": False,
+            },
         )
         tdb.add_event(
             conn,
@@ -336,6 +367,9 @@ def _advance_close(
         return
 
     order_no = str(row.get("last_order_no") or "").strip()
+    unverified = _is_unverified(row)
+    fill: dict | None = None
+
     if order_no:
         try:
             fill = fetch_order_fill(
@@ -350,6 +384,11 @@ def _advance_close(
         if fill is None:
             return
         if fill["working"] or fill["complete"]:
+            if unverified:
+                tdb.upsert_position(
+                    conn,
+                    {**row, "order_unverified": False, "qty": live["qty"]},
+                )
             return
         tdb.add_event(
             conn,
@@ -361,12 +400,20 @@ def _advance_close(
             ),
             symbol=symbol,
         )
+        row = {**row, "order_unverified": False, "last_order_no": ""}
+    elif unverified:
+        return
+
+    qty = _close_qty(live, fill)
+    if qty <= 0:
+        tdb.add_event(conn, "order_skip", "재주문 수량 없음", symbol=symbol)
+        return
 
     _submit_close_order(
         conn,
         profile,
-        row,
-        live,
+        {**row, "qty": qty},
+        {**live, "qty": qty},
         token=token,
         actions=actions,
         event_kind="order_retry" if order_no else "order_sent",
@@ -383,15 +430,17 @@ def _submit_close_order(
     actions: list[dict],
     event_kind: str = "order_sent",
 ) -> None:
-    """시장가 청산 1회. 주문번호가 나오면 CLOSING으로 두고 체결을 기다린다."""
+    """시장가 청산 1회. 전송 전에 미확인으로 표시하고, 응답이 불확실하면 재전송하지 않는다."""
     symbol = row["symbol"]
-    updated = {
+    pending = {
         **row,
         "qty": live["qty"],
         "enabled": False,
         "status": tdb.STATUS_CLOSING,
+        "order_unverified": True,
     }
-    tdb.upsert_position(conn, updated)
+    tdb.upsert_position(conn, pending)
+    conn.commit()
     try:
         result = close_position_market(
             profile,
@@ -400,18 +449,19 @@ def _submit_close_order(
             live["qty"],
             token=token,
         )
-        new_no = result.get("order_no") or ""
+        new_no = str(result.get("order_no") or "").strip()
         tdb.upsert_position(
             conn,
             {
-                **updated,
+                **pending,
                 "last_order_no": new_no,
+                "order_unverified": not bool(new_no),
             },
         )
         tdb.add_event(
             conn,
             event_kind,
-            f"order_no={new_no} msg={result.get('msg')}",
+            f"order_no={new_no or '(없음)'} msg={result.get('msg')}",
             symbol=symbol,
         )
         actions.append(
@@ -421,8 +471,20 @@ def _submit_close_order(
                 "order_no": new_no,
             }
         )
+    except OrderUncertainError as exc:
+        tdb.upsert_position(conn, pending)
+        tdb.add_event(
+            conn,
+            "order_uncertain",
+            f"전송 결과 불명 — 재전송 금지: {exc}",
+            symbol=symbol,
+        )
+        actions.append({"symbol": symbol, "action": "order_uncertain", "error": str(exc)})
     except Exception as exc:
-        tdb.upsert_position(conn, updated)
+        tdb.upsert_position(
+            conn,
+            {**pending, "order_unverified": False},
+        )
         tdb.add_event(conn, "order_error", str(exc), symbol=symbol)
         actions.append({"symbol": symbol, "action": "order_error", "error": str(exc)})
 

@@ -12,7 +12,7 @@ import yaml
 
 VPS_BASE_URL = "https://openapivts.koreainvestment.com:29443"
 PROD_BASE_URL = "https://openapi.koreainvestment.com:9443"
-SSL_VERIFY = os.getenv("KIS_SSL_VERIFY", "0").lower() in ("1", "true", "yes")
+SSL_VERIFY = os.getenv("KIS_SSL_VERIFY", "1").lower() in ("1", "true", "yes")
 API_INTERVAL_SEC = float(os.getenv("KIS_API_INTERVAL", "0.5"))
 CFG_DIR = Path(__file__).resolve().parent.parent / "cfg"
 
@@ -268,51 +268,43 @@ def api_post(
     tr_id: str,
     path: str,
     body: dict,
-    retries: int = 4,
 ) -> dict:
-    last_error: Exception | None = None
-    for attempt in range(retries):
-        try:
-            hashkey = issue_hashkey(profile, appkey, appsecret, body)
-            _throttle()
-            url = f"{base_url_for(profile)}{path}"
-            headers = {
-                "content-type": "application/json",
-                "authorization": f"Bearer {access_token}",
-                "appkey": appkey,
-                "appsecret": appsecret,
-                "tr_id": tr_id,
-                "custtype": "P",
-                "hashkey": hashkey,
-            }
-            response = requests.post(
-                url, headers=headers, data=json.dumps(body), timeout=30, verify=SSL_VERIFY
-            )
-            data = _response_json(response)
-            if _is_expired_token(data):
-                if attempt + 1 >= retries:
-                    raise RuntimeError(f"{data.get('msg_cd')}: {data.get('msg1')}")
-                access_token = _refresh_access_token(
-                    profile, appkey, appsecret, access_token
-                )
-                continue
-            if response.status_code >= 500:
-                raise requests.HTTPError(
-                    f"{response.status_code} Server Error for url: {response.url}",
-                    response=response,
-                )
-            response.raise_for_status()
-            if data.get("rt_cd") != "0":
+    """주문 등 POST. 타임아웃·5xx 는 재시도하지 않는다 (이미 접수됐을 수 있음).
+
+    만료 토큰 응답만 갱신 후 1회 더 시도한다 (접수가 거절된 경우).
+    """
+    token_retried = False
+    while True:
+        hashkey = issue_hashkey(profile, appkey, appsecret, body)
+        _throttle()
+        url = f"{base_url_for(profile)}{path}"
+        headers = {
+            "content-type": "application/json",
+            "authorization": f"Bearer {access_token}",
+            "appkey": appkey,
+            "appsecret": appsecret,
+            "tr_id": tr_id,
+            "custtype": "P",
+            "hashkey": hashkey,
+        }
+        response = requests.post(
+            url, headers=headers, data=json.dumps(body), timeout=30, verify=SSL_VERIFY
+        )
+        data = _response_json(response)
+        if _is_expired_token(data):
+            if token_retried:
                 raise RuntimeError(f"{data.get('msg_cd')}: {data.get('msg1')}")
-            return data
-        except (requests.HTTPError, requests.ConnectionError, requests.Timeout) as exc:
-            last_error = exc
-            if attempt + 1 < retries:
-                time.sleep(1.0 * (attempt + 1))
-                continue
-            raise
-        except RuntimeError:
-            raise
-    if last_error:
-        raise last_error
-    raise RuntimeError("API 호출 실패")
+            token_retried = True
+            access_token = _refresh_access_token(
+                profile, appkey, appsecret, access_token
+            )
+            continue
+        if response.status_code >= 500:
+            raise requests.HTTPError(
+                f"{response.status_code} Server Error for url: {response.url}",
+                response=response,
+            )
+        response.raise_for_status()
+        if data.get("rt_cd") != "0":
+            raise RuntimeError(f"{data.get('msg_cd')}: {data.get('msg1')}")
+        return data

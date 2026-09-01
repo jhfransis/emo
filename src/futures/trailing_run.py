@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import sys
 import time
 from datetime import datetime
@@ -36,7 +37,11 @@ from futures.trailing_schedule import (
     save_catchup_state,
     seconds_until,
 )
-from futures.worker_launcher import register_worker_pid_lifecycle
+from futures.worker_launcher import (
+    acquire_worker_lock,
+    register_worker_pid_lifecycle,
+    release_worker_lock,
+)
 from futures import trailing_db as tdb
 from kis_client import get_active_profile
 
@@ -148,7 +153,12 @@ def _advance_catchup(
 
 def main() -> int:
     args = parse_args()
-    if not args.once:
+    if not acquire_worker_lock():
+        print("트레일링 워커가 이미 실행 중입니다.", file=sys.stderr)
+        return 1
+    if args.once:
+        atexit.register(release_worker_lock)
+    else:
         register_worker_pid_lifecycle()
 
     price_interval = max(2, int(args.interval or args.price_interval))

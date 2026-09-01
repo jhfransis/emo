@@ -10,6 +10,7 @@ Group=fransis
 WorkingDirectory=/home/fransis/project/kona
 Environment=HOME=/home/fransis
 Environment=PATH=/home/fransis/miniforge3/bin:/usr/local/bin:/usr/bin:/bin
+Environment=KIS_SSL_VERIFY=1
 ExecStart=/home/fransis/miniforge3/bin/streamlit run app/kona_futures.py
 Restart=on-failure
 RestartSec=5

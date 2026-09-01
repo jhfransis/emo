@@ -71,6 +71,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             last_price REAL,
             status TEXT NOT NULL,
             last_order_no TEXT,
+            order_unverified INTEGER NOT NULL DEFAULT 0,
             updated_at TEXT NOT NULL
         );
 
@@ -116,6 +117,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             "entry_price": "REAL",
             "bar_extreme": "REAL",
             "bar_cursor_datetime": "TEXT",
+            "order_unverified": "INTEGER DEFAULT 0",
         },
     )
     conn.commit()
@@ -191,6 +193,7 @@ def upsert_position(conn: sqlite3.Connection, data: dict) -> None:
         "last_price": data.get("last_price"),
         "status": data.get("status") or STATUS_STOPPED,
         "last_order_no": data.get("last_order_no") or "",
+        "order_unverified": 1 if data.get("order_unverified") else 0,
         "updated_at": data.get("updated_at") or _now(),
     }
     conn.execute(
@@ -198,11 +201,13 @@ def upsert_position(conn: sqlite3.Connection, data: dict) -> None:
         INSERT INTO trail_positions (
             symbol, prdt_name, side, qty, enabled, trail_points,
             entry_price, bar_extreme, bar_cursor_datetime,
-            extreme_price, stop_price, last_price, status, last_order_no, updated_at
+            extreme_price, stop_price, last_price, status, last_order_no,
+            order_unverified, updated_at
         ) VALUES (
             :symbol, :prdt_name, :side, :qty, :enabled, :trail_points,
             :entry_price, :bar_extreme, :bar_cursor_datetime,
-            :extreme_price, :stop_price, :last_price, :status, :last_order_no, :updated_at
+            :extreme_price, :stop_price, :last_price, :status, :last_order_no,
+            :order_unverified, :updated_at
         )
         ON CONFLICT(symbol) DO UPDATE SET
             prdt_name=excluded.prdt_name,
@@ -218,6 +223,7 @@ def upsert_position(conn: sqlite3.Connection, data: dict) -> None:
             last_price=excluded.last_price,
             status=excluded.status,
             last_order_no=excluded.last_order_no,
+            order_unverified=excluded.order_unverified,
             updated_at=excluded.updated_at
         """,
         payload,
@@ -287,6 +293,7 @@ def close_position_from_balance(conn: sqlite3.Connection, row: dict) -> None:
             "stop_price": None,
             "last_price": None,
             "last_order_no": "",
+            "order_unverified": False,
         },
     )
     add_event(
