@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from datetime import datetime, timedelta
 
-from kis_client import api_get, issue_access_token, load_profile
+from kis_client import API_INTERVAL_SEC, api_get, issue_access_token, load_profile
 
 from .futures_products import DAILY_START_DATE, market_div_for, market_div_for_session
 from .futures_symbols import resolve_symbol
@@ -13,7 +13,6 @@ from .futures_symbols import resolve_symbol
 DAILY_TR_ID = "FHKIF03020100"
 DAILY_API_PATH = "/uapi/domestic-futureoption/v1/quotations/inquire-daily-fuopchartprice"
 CHUNK_DAYS = 20
-RETRY_SLEEP_SEC = 1.0
 # 만기 이후(월말·야간 만기전날 차이) 빈 청크를 건너뛸 상한. 20일×2 ≈ 40일.
 MAX_LEADING_EMPTY_CHUNKS = 2
 
@@ -59,7 +58,7 @@ def fetch_daily_range(
         except Exception as exc:
             last_error = exc
             if attempt + 1 < retries:
-                time.sleep(RETRY_SLEEP_SEC * (attempt + 1))
+                time.sleep(API_INTERVAL_SEC)
     if last_error:
         raise last_error
     return []

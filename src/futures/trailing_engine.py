@@ -616,13 +616,42 @@ def _sync_trail_from_live(
             "entry_price": live.get("entry_price") or prev.get("entry_price"),
         }
         if side_changed and tdb.is_close_pending(prev):
-            updates["side"] = prev["side"]
+            # 잔고가 반대면 기존 포지션은 이미 없음. 옛 사이드 청산을
+            # 이어가면 신규 포지션을 더 키운다.
             tdb.add_event(
                 conn,
-                "side_changed_ignored",
-                f"{prev['side']} -> {live['side']} 청산 중이라 무시",
+                "side_changed_abort_close",
+                (
+                    f"{prev['side']} -> {live['side']} "
+                    "청산 중 잔고 반전 — 청산 중단 후 재시작"
+                ),
                 symbol=symbol,
             )
+            tdb.upsert_position(
+                conn,
+                {
+                    **prev,
+                    "side": live["side"],
+                    "qty": live["qty"],
+                    "status": tdb.STATUS_WATCHING,
+                    "enabled": False,
+                    "order_unverified": False,
+                    "last_order_no": "",
+                    "close_submitted_at": None,
+                },
+            )
+            try:
+                _bootstrap_auto_trail(
+                    conn,
+                    profile,
+                    live,
+                    token=token,
+                    trail_points=default_trail,
+                    session=session,
+                )
+            except Exception as exc:
+                tdb.add_event(conn, "bootstrap_error", str(exc), symbol=symbol)
+            continue
         elif side_changed:
             updates["bar_extreme"] = None
             updates["bar_cursor_datetime"] = None
@@ -636,6 +665,8 @@ def _sync_trail_from_live(
             )
             updates["status"] = tdb.STATUS_WATCHING
             updates["last_order_no"] = ""
+            updates["order_unverified"] = False
+            updates["close_submitted_at"] = None
             tdb.add_event(
                 conn,
                 "side_changed",

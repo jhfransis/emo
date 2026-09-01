@@ -13,7 +13,8 @@ import yaml
 VPS_BASE_URL = "https://openapivts.koreainvestment.com:29443"
 PROD_BASE_URL = "https://openapi.koreainvestment.com:9443"
 SSL_VERIFY = os.getenv("KIS_SSL_VERIFY", "1").lower() in ("1", "true", "yes")
-API_INTERVAL_SEC = float(os.getenv("KIS_API_INTERVAL", "0.5"))
+# 한투 REST 한도 20 TPS. 기본 50ms, KIS_API_INTERVAL로 덮어씀.
+API_INTERVAL_SEC = float(os.getenv("KIS_API_INTERVAL", "0.05"))
 CFG_DIR = Path(__file__).resolve().parent.parent / "cfg"
 
 if not SSL_VERIFY:

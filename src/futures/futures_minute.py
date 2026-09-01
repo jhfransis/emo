@@ -5,7 +5,7 @@ from __future__ import annotations
 import time as time_mod
 from datetime import datetime, time, timedelta
 
-from kis_client import api_get, issue_access_token, load_profile
+from kis_client import API_INTERVAL_SEC, api_get, issue_access_token, load_profile
 
 from .futures_products import (
     SESSION_DAY,
@@ -15,7 +15,6 @@ from .futures_products import (
 
 MINUTE_TR_ID = "FHKIF03020200"
 MAX_BARS_PER_CALL = 102
-API_SLEEP_SEC = 0.35
 
 
 def completed_cutoff(now: datetime | None = None) -> datetime:
@@ -188,7 +187,7 @@ def fetch_minute_page(
         except Exception as exc:
             last_error = exc
             if attempt + 1 < retries:
-                time_mod.sleep(API_SLEEP_SEC * (attempt + 2))
+                time_mod.sleep(API_INTERVAL_SEC)
     if last_error:
         raise last_error
     return [], None
@@ -368,7 +367,6 @@ def _download_minute_backward_symbol(
                     flush=True,
                 )
             date_cursor, time_cursor = nxt_date, nxt_time
-            time_mod.sleep(API_SLEEP_SEC)
             continue
 
         page_bars: list[dict] = []
@@ -420,7 +418,6 @@ def _download_minute_backward_symbol(
             if (nxt_date, nxt_time) == (date_cursor, time_cursor):
                 break
             date_cursor, time_cursor = nxt_date, nxt_time
-            time_mod.sleep(API_SLEEP_SEC)
             continue
 
         oldest_in_page = min(parsed, key=lambda item: item["trade_datetime"])
@@ -435,7 +432,6 @@ def _download_minute_backward_symbol(
         if (nxt_date, nxt_time) == (date_cursor, time_cursor):
             break
         date_cursor, time_cursor = nxt_date, nxt_time
-        time_mod.sleep(API_SLEEP_SEC)
 
     bars = [by_datetime[key] for key in sorted(by_datetime)]
     return symbol, bars
